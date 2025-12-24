@@ -1,25 +1,27 @@
-from flask import Flask, jsonify
-import random
-import datetime
+from fastapi import FastAPI
+from pydantic import BaseModel
+from datetime import datetime
 
-app = Flask(__name__)
+app = FastAPI(title="Gerenciador de Sinais API")
 
-@app.route("/gerar-sinal")
-def gerar_sinal():
-    ativos = ["EURUSD", "GBPUSD", "USDJPY"]
-    direcoes = ["CALL", "PUT"]
-    tempos = ["1M", "5M"]
+class SignalRequest(BaseModel):
+    symbol: str
+    direction: str
+    timeframe: str
 
-    agora = datetime.datetime.now().strftime("%H:%M")
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "API online"}
 
-    sinal = {
-        "ativo": random.choice(ativos),
-        "direcao": random.choice(direcoes),
-        "tempo": random.choice(tempos),
-        "horario": agora
+@app.get("/health")
+def health():
+    return {"status": "healthy", "time": datetime.utcnow()}
+
+@app.post("/signal")
+def generate_signal(data: SignalRequest):
+    return {
+        "symbol": data.symbol,
+        "direction": data.direction,
+        "timeframe": data.timeframe,
+        "generated_at": datetime.utcnow()
     }
-
-    return jsonify(sinal)
-
-if __name__ == "__main__":
-    app.run(debug=True)
