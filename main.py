@@ -1,13 +1,14 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
+import uuid
 
 app = FastAPI(title="Gerenciador de Sinais API")
 
-# CORS liberado
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,57 +17,90 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===== MODELO =====
-class SignalRequest(BaseModel):
+JST = ZoneInfo("Asia/Tokyo")
+
+# ===== MODELOS =====
+class TradeRequest(BaseModel):
     symbol: str
-    direction: str | None = None
-    timeframe: str
+    timeframe: int  # minutos
 
-# ===== ROTAS =====
-@app.get("/")
-def root():
-    return {
-        "status": "ok",
-        "time_jst": datetime.now(ZoneInfo("Asia/Tokyo")).isoformat()
-    }
+# ===== STORAGE TEMP (MVP) =====
+TRADES = {}
 
+# ===== PREÇO BINANCE =====
+def get_binance_price(symbol: str) -> float:
+    url = "https://api.binance.com/api/v3/ticker/price"
+    r = requests.get(url, params={"symbol": symbol.upper()}, timeout=10)
+    r.raise_for_status()
+    return float(r.json()["price"])
+
+# ===== HEALTH =====
 @app.get("/health")
 def health():
     return {
         "status": "healthy",
-        "time_jst": datetime.now(ZoneInfo("Asia/Tokyo")).isoformat()
+        "time_jst": datetime.now(JST).isoformat()
     }
 
-# ===== PREÇO EM TEMPO REAL (CRYPTO - BINANCE) =====
-@app.get("/price")
-def get_price(symbol: str = Query(..., description="Ex: BTCUSDT")):
-    url = "https://api.binance.com/api/v3/ticker/price"
-    response = requests.get(url, params={"symbol": symbol.upper()}, timeout=10)
+# ===== CRIAR TRADE =====
+@app.post("/trade")
+def create_trade(data: TradeRequest):
+    trade_id = str(uuid.uuid4())
 
-    if response.status_code != 200:
-        return {"error": "Símbolo inválido ou erro na Binance"}
+    now = datetime.now(JST)
+    entry_time = now + timedelta(minutes=2)
+    expiry_time = entry_time + timedelta(minutes=data.timeframe)
 
-    data = response.json()
+    direction = "BUY" if now.second % 2 == 0 else "SELL"
 
-    return {
-        "symbol": symbol.upper(),
-        "price": float(data["price"]),
-        "time_jst": datetime.now(ZoneInfo("Asia/Tokyo")).isoformat()
-    }
-
-# ===== GERAR SINAL =====
-@app.post("/signal")
-def generate_signal(data: SignalRequest):
-    # Lógica simples inicial (depois evolui para IA)
-    direction = "BUY" if datetime.utcnow().second % 2 == 0 else "SELL"
-
-    entry_time = datetime.now(ZoneInfo("Asia/Tokyo"))
-    expiry_minutes = 5
-
-    return {
-        "symbol": data.symbol,
+    TRADES[trade_id] = {
+        "id": trade_id,
+        "symbol": data.symbol.upper(),
         "direction": direction,
         "timeframe": data.timeframe,
+        "entry_time": entry_time,
+        "expiry_time": expiry_time,
+        "entry_price": None,
+        "result": None,
+    }
+
+    return {
+        "trade_id": trade_id,
+        "symbol": data.symbol.upper(),
+        "direction": direction,
         "entry_time_jst": entry_time.isoformat(),
-        "expiry_minutes": expiry_minutes
+        "expiry_time_jst": expiry_time.isoformat(),
+    }
+
+# ===== STATUS DO TRADE =====
+@app.get("/trade/{trade_id}")
+def trade_status(trade_id: str):
+    trade = TRADES.get(trade_id)
+    if not trade:
+        return {"error": "Trade not found"}
+
+    now = datetime.now(JST)
+
+    # Registrar preço de entrada
+    if trade["entry_price"] is None and now >= trade["entry_time"]:
+        trade["entry_price"] = get_binance_price(trade["symbol"])
+
+    # Finalizar trade
+    if trade["entry_price"] and trade["result"] is None and now >= trade["expiry_time"]:
+        final_price = get_binance_price(trade["symbol"])
+
+        if trade["direction"] == "BUY":
+            trade["result"] = "WIN" if final_price > trade["entry_price"] else "LOSS"
+        else:
+            trade["result"] = "WIN" if final_price < trade["entry_price"] else "LOSS"
+
+        trade["final_price"] = final_price
+
+    return {
+        "trade_id": trade["id"],
+        "symbol": trade["symbol"],
+        "direction": trade["direction"],
+        "entry_price": trade["entry_price"],
+        "result": trade["result"],
+        "time_jst": now.isoformat(),
     }
