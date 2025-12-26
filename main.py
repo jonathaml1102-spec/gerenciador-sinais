@@ -1,10 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
 import uuid
+
+from sqlalchemy.orm import Session
+from db import SessionLocal, Base, engine
+from models import Trade
 
 app = FastAPI(title="Gerenciador de Sinais API")
 
@@ -19,32 +23,32 @@ app.add_middleware(
 
 JST = ZoneInfo("Asia/Tokyo")
 
-# ===== MODELOS =====
+# cria tabela automaticamente no SQLite (persistente no Disk do Render)
+Base.metadata.create_all(bind=engine)
+
 class TradeRequest(BaseModel):
     symbol: str
     timeframe: int  # minutos
 
-# ===== STORAGE TEMP (MVP) =====
-TRADES = {}
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-# ===== PREÇO BINANCE =====
 def get_binance_price(symbol: str) -> float:
     url = "https://api.binance.com/api/v3/ticker/price"
     r = requests.get(url, params={"symbol": symbol.upper()}, timeout=10)
     r.raise_for_status()
     return float(r.json()["price"])
 
-# ===== HEALTH =====
 @app.get("/health")
 def health():
-    return {
-        "status": "healthy",
-        "time_jst": datetime.now(JST).isoformat()
-    }
+    return {"status": "healthy", "time_jst": datetime.now(JST).isoformat()}
 
-# ===== CRIAR TRADE =====
 @app.post("/trade")
-def create_trade(data: TradeRequest):
+def create_trade(data: TradeRequest, db: Session = Depends(get_db)):
     trade_id = str(uuid.uuid4())
 
     now = datetime.now(JST)
@@ -53,54 +57,64 @@ def create_trade(data: TradeRequest):
 
     direction = "BUY" if now.second % 2 == 0 else "SELL"
 
-    TRADES[trade_id] = {
-        "id": trade_id,
-        "symbol": data.symbol.upper(),
-        "direction": direction,
-        "timeframe": data.timeframe,
-        "entry_time": entry_time,
-        "expiry_time": expiry_time,
-        "entry_price": None,
-        "result": None,
-    }
+    trade = Trade(
+        id=trade_id,
+        symbol=data.symbol.upper(),
+        direction=direction,
+        timeframe=data.timeframe,
+        entry_time_jst=entry_time.isoformat(),
+        expiry_time_jst=expiry_time.isoformat(),
+        entry_price=None,
+        final_price=None,
+        result=None,
+    )
+
+    db.add(trade)
+    db.commit()
+    db.refresh(trade)
 
     return {
-        "trade_id": trade_id,
-        "symbol": data.symbol.upper(),
-        "direction": direction,
-        "entry_time_jst": entry_time.isoformat(),
-        "expiry_time_jst": expiry_time.isoformat(),
+        "trade_id": trade.id,
+        "symbol": trade.symbol,
+        "direction": trade.direction,
+        "entry_time_jst": trade.entry_time_jst,
+        "expiry_time_jst": trade.expiry_time_jst,
     }
 
-# ===== STATUS DO TRADE =====
 @app.get("/trade/{trade_id}")
-def trade_status(trade_id: str):
-    trade = TRADES.get(trade_id)
+def trade_status(trade_id: str, db: Session = Depends(get_db)):
+    trade = db.query(Trade).filter(Trade.id == trade_id).first()
     if not trade:
         return {"error": "Trade not found"}
 
     now = datetime.now(JST)
 
-    # Registrar preço de entrada
-    if trade["entry_price"] is None and now >= trade["entry_time"]:
-        trade["entry_price"] = get_binance_price(trade["symbol"])
+    entry_time = datetime.fromisoformat(trade.entry_time_jst)
+    expiry_time = datetime.fromisoformat(trade.expiry_time_jst)
 
-    # Finalizar trade
-    if trade["entry_price"] and trade["result"] is None and now >= trade["expiry_time"]:
-        final_price = get_binance_price(trade["symbol"])
+    if trade.entry_price is None and now >= entry_time:
+        trade.entry_price = get_binance_price(trade.symbol)
+        db.commit()
+        db.refresh(trade)
 
-        if trade["direction"] == "BUY":
-            trade["result"] = "WIN" if final_price > trade["entry_price"] else "LOSS"
+    if trade.entry_price is not None and trade.result is None and now >= expiry_time:
+        final_price = get_binance_price(trade.symbol)
+        trade.final_price = final_price
+
+        if trade.direction == "BUY":
+            trade.result = "WIN" if final_price > trade.entry_price else "LOSS"
         else:
-            trade["result"] = "WIN" if final_price < trade["entry_price"] else "LOSS"
+            trade.result = "WIN" if final_price < trade.entry_price else "LOSS"
 
-        trade["final_price"] = final_price
+        db.commit()
+        db.refresh(trade)
 
     return {
-        "trade_id": trade["id"],
-        "symbol": trade["symbol"],
-        "direction": trade["direction"],
-        "entry_price": trade["entry_price"],
-        "result": trade["result"],
+        "trade_id": trade.id,
+        "symbol": trade.symbol,
+        "direction": trade.direction,
+        "entry_price": trade.entry_price,
+        "final_price": trade.final_price,
+        "result": trade.result,
         "time_jst": now.isoformat(),
     }
