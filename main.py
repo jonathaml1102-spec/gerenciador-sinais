@@ -12,7 +12,6 @@ from models import Trade
 
 app = FastAPI(title="Gerenciador de Sinais API")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,12 +22,11 @@ app.add_middleware(
 
 JST = ZoneInfo("Asia/Tokyo")
 
-# cria tabela automaticamente no SQLite (persistente no Disk do Render)
 Base.metadata.create_all(bind=engine)
 
 class TradeRequest(BaseModel):
     symbol: str
-    timeframe: int  # minutos
+    timeframe: int
 
 def get_db():
     db = SessionLocal()
@@ -88,14 +86,12 @@ def trade_status(trade_id: str, db: Session = Depends(get_db)):
         return {"error": "Trade not found"}
 
     now = datetime.now(JST)
-
     entry_time = datetime.fromisoformat(trade.entry_time_jst)
     expiry_time = datetime.fromisoformat(trade.expiry_time_jst)
 
     if trade.entry_price is None and now >= entry_time:
         trade.entry_price = get_binance_price(trade.symbol)
         db.commit()
-        db.refresh(trade)
 
     if trade.entry_price is not None and trade.result is None and now >= expiry_time:
         final_price = get_binance_price(trade.symbol)
@@ -107,7 +103,6 @@ def trade_status(trade_id: str, db: Session = Depends(get_db)):
             trade.result = "WIN" if final_price < trade.entry_price else "LOSS"
 
         db.commit()
-        db.refresh(trade)
 
     return {
         "trade_id": trade.id,
