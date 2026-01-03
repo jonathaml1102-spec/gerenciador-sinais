@@ -35,12 +35,20 @@ def get_db():
     finally:
         db.close()
 
-def get_binance_price(symbol: str) -> float:
-    url = "https://api.binance.com/api/v3/ticker/price"
-    r = requests.get(url, params={"symbol": symbol.upper()}, timeout=10)
-    r.raise_for_status()
-    return float(r.json()["price"])
-
+def get_binance_price(symbol: str):
+    try:
+        url = "https://api.binance.com/api/v3/ticker/price"
+        r = requests.get(
+            url,
+            params={"symbol": symbol.upper()},
+            timeout=5
+        )
+        r.raise_for_status()
+        data = r.json()
+        return float(data["price"])
+    except Exception as e:
+        print(f"Erro Binance ({symbol}): {e}")
+        return None
 
         except Exception as e:
             last_err = str(e)
@@ -95,14 +103,33 @@ def trade_status(trade_id: str, db: Session = Depends(get_db)):
     entry_time = datetime.fromisoformat(trade.entry_time_jst)
     expiry_time = datetime.fromisoformat(trade.expiry_time_jst)
 
-    if trade.entry_price is None and now >= entry_time:
-        trade.entry_price = get_binance_price(trade.symbol)
+    # Registrar preço de entrada
+if trade["entry_price"] is None and now >= trade["entry_time"]:
+    price = get_binance_price(trade["symbol"])
+    if price is not None:
+        trade["entry_price"] = price
+    else:
+        return {
+            "trade_id": trade["id"],
+            "symbol": trade["symbol"],
+            "direction": trade["direction"],
+            "status": "waiting_entry_price",
+            "time_jst": now.isoformat(),
+        }
         db.commit()
 
-    if trade.entry_price is not None and trade.result is None and now >= expiry_time:
-        final_price = get_binance_price(trade.symbol)
-        trade.final_price = final_price
-
+           trade.final_price = final_price
+# Finalizar trade
+if trade["entry_price"] and trade["result"] is None and now >= trade["expiry_time"]:
+    final_price = get_binance_price(trade["symbol"])
+    if final_price is None:
+        return {
+            "trade_id": trade["id"],
+            "symbol": trade["symbol"],
+            "direction": trade["direction"],
+            "status": "waiting_final_price",
+            "time_jst": now.isoformat(),
+        }
         if trade.direction == "BUY":
             trade.result = "WIN" if final_price > trade.entry_price else "LOSS"
         else:
