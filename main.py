@@ -35,20 +35,12 @@ def get_db():
     finally:
         db.close()
 
-
 def get_binance_price(symbol: str) -> float:
     url = "https://api.binance.com/api/v3/ticker/price"
+    r = requests.get(url, params={"symbol": symbol.upper()}, timeout=10)
+    r.raise_for_status()
+    return float(r.json()["price"])
 
-    last_err = None
-    for _ in range(3):
-        try:
-            r = requests.get(url, params={"symbol": symbol.upper()}, timeout=10)
-
-            if r.status_code != 200:
-                last_err = f"Binance HTTP {r.status_code}: {r.text}"
-                continue
-
-            return float(r.json()["price"])
 
         except Exception as e:
             last_err = str(e)
